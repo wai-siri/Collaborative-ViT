@@ -1,0 +1,45 @@
+# ===== Python =====
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg-info/
+*.egg
+dist/
+build/
+*.whl
+pip-log.txt
+pip-delete-this-directory.txt
+
+# ===== Virtual Environment =====
+venv/
+env/
+.env/
+.venv/
+
+# ===== IDE =====
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.project
+.settings/
+.classpath
+
+# ===== OS =====
+.DS_Store
+Thumbs.db
+Desktop.ini
+ehthumbs.db
+
+# ===== Test Output =====
+test_file/result/
+test_file/match_curve/
+test_file/momo.jpg
+
+# ===== Jupyter Notebook =====
+.ipynb_checkpoints/
+
+# ===== Logs =====
+*.log
