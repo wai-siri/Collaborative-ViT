@@ -4,8 +4,8 @@ import matplotlib.pyplot as plt
 import numpy as np
 import torch
 
-from declining_rate import declining_rate
-from schedule import schedule, init
+from ..schedule.declining_rate import declining_rate
+from ..schedule.schedule import schedule, init
 
 
 def simulate_bandwidth(N, x_0, D_M, bits, num_steps, step, SLA):
