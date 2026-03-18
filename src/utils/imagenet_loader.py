@@ -1,0 +1,154 @@
+"""
+ImageNet数据加载器
+从parquet格式文件加载ImageNet验证集数据
+"""
+
+import pandas as pd
+from PIL import Image
+import io
+import torch
+from torch.utils.data import Dataset, DataLoader
+from torchvision import transforms
+
+# 检查parquet依赖
+try:
+    import pyarrow
+except ImportError:
+    print("Warning: pyarrow not installed. Installing...")
+    print("Please run: pip install pyarrow")
+    print("Or: conda install pyarrow")
+
+
+class ImageNetParquetDataset(Dataset):
+    """
+    ImageNet Parquet格式数据集
+    """
+    
+    def __init__(self, parquet_path, transform=None):
+        """
+        Args:
+            parquet_path: str, parquet文件路径
+            transform: torchvision.transforms, 图像变换
+        """
+        print(f"Loading ImageNet data from {parquet_path}...")
+        self.df = pd.read_parquet(parquet_path)
+        self.transform = transform
+        print(f"Loaded {len(self.df)} images")
+    
+    def __len__(self):
+        return len(self.df)
+    
+    def __getitem__(self, idx):
+        """
+        获取单个样本
+        
+        Returns:
+            tuple: (image_tensor, label)
+        """
+        row = self.df.iloc[idx]
+        
+        # 解码图像字节流
+        img_bytes = row['image']['bytes']
+        img = Image.open(io.BytesIO(img_bytes)).convert('RGB')
+        
+        # 获取标签
+        label = row['label']
+        
+        # 应用变换
+        if self.transform:
+            img = self.transform(img)
+        
+        return img, label
+
+
+def get_imagenet_loader(parquet_path, batch_size=1, num_workers=0, shuffle=False):
+    """
+    获取ImageNet DataLoader
+    
+    Args:
+        parquet_path: str, parquet文件路径
+        batch_size: int, batch大小
+        num_workers: int, 数据加载线程数
+        shuffle: bool, 是否打乱数据
+    
+    Returns:
+        DataLoader
+    """
+    # ViT-L@384的标准预处理
+    transform = transforms.Compose([
+        transforms.Resize(384),
+        transforms.CenterCrop(384),
+        transforms.ToTensor(),
+        transforms.Normalize(mean=[0.485, 0.456, 0.406],
+                           std=[0.229, 0.224, 0.225])
+    ])
+    
+    dataset = ImageNetParquetDataset(parquet_path, transform=transform)
+    loader = DataLoader(
+        dataset, 
+        batch_size=batch_size, 
+        shuffle=shuffle,
+        num_workers=num_workers,
+        pin_memory=True if torch.cuda.is_available() else False
+    )
+    
+    return loader
+
+
+def verify_imagenet_data(parquet_path):
+    """
+    验证ImageNet数据是否可以正确加载
+    
+    Args:
+        parquet_path: str, parquet文件路径
+    """
+    print("="*60)
+    print("Verifying ImageNet Data")
+    print("="*60)
+    
+    # 加载数据
+    loader = get_imagenet_loader(parquet_path, batch_size=1)
+    
+    print(f"\nDataset size: {len(loader.dataset)}")
+    print(f"Batch size: {loader.batch_size}")
+    
+    # 测试加载第一个batch
+    print("\nLoading first batch...")
+    for images, labels in loader:
+        print(f"Image shape: {images.shape}")
+        print(f"Image dtype: {images.dtype}")
+        print(f"Image range: [{images.min():.3f}, {images.max():.3f}]")
+        print(f"Label: {labels.item()}")
+        break
+    
+    # 统计标签分布
+    print("\nLabel statistics:")
+    all_labels = [label.item() for _, label in loader]
+    unique_labels = set(all_labels)
+    print(f"Unique labels: {len(unique_labels)}")
+    print(f"Label range: [{min(all_labels)}, {max(all_labels)}]")
+    
+    print("\n" + "="*60)
+    print("✓ ImageNet data verified successfully!")
+    print("="*60)
+
+
+if __name__ == "__main__":
+    import sys
+    from pathlib import Path
+    
+    # 默认路径
+    default_path = "data/validation-00000-of-00014.parquet"
+    
+    # 如果提供了命令行参数
+    if len(sys.argv) > 1:
+        parquet_path = sys.argv[1]
+    else:
+        parquet_path = default_path
+    
+    # 验证数据
+    if Path(parquet_path).exists():
+        verify_imagenet_data(parquet_path)
+    else:
+        print(f"Error: File not found: {parquet_path}")
+        print(f"Usage: python {sys.argv[0]} [parquet_path]")

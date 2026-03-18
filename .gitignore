@@ -1,45 +1,98 @@
-# ===== Python =====
+# Python
 __pycache__/
 *.py[cod]
 *$py.class
 *.so
-*.egg-info/
-*.egg
-dist/
+.Python
 build/
-*.whl
-pip-log.txt
-pip-delete-this-directory.txt
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+pip-wheel-metadata/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
 
-# ===== Virtual Environment =====
+# Virtual Environment
 venv/
 env/
-.env/
+ENV/
+env.bak/
+venv.bak/
 .venv/
 
-# ===== IDE =====
-.idea/
+# PyTorch & Models
+models/pretrained/
+*.pth
+*.pt
+*.ckpt
+*.safetensors
+
+# Dataset
+data/
+*.parquet
+*.csv
+*.json
+*.h5
+*.hdf5
+
+# Experiment Results
+results/
+figures/
+*.png
+*.jpg
+*.jpeg
+*.pdf
+!article/*.pdf
+!article/*.md
+
+# Logs
+*.log
+logs/
+*.out
+
+# IDE
 .vscode/
+.idea/
 *.swp
 *.swo
 *~
-.project
-.settings/
-.classpath
-
-# ===== OS =====
 .DS_Store
+
+# Jupyter Notebook
+.ipynb_checkpoints
+*.ipynb
+
+# Environment variables
+.env
+.env.local
+
+# Assets directory (profiler data, network traces, etc.)
+assets/
+
+# Documentation
+*.md
+
+# Temporary files
+*.tmp
+*.temp
+*.bak
+*.backup
+
+# System files
 Thumbs.db
-Desktop.ini
-ehthumbs.db
+.DS_Store
+desktop.ini
 
-# ===== Test Output =====
-test_file/result/
-test_file/match_curve/
-test_file/momo.jpg
-
-# ===== Jupyter Notebook =====
-.ipynb_checkpoints/
-
-# ===== Logs =====
-*.log
+# Git
+*.orig

@@ -1,22 +1,29 @@
 import json
 import math
 import os
+import sys
+
+# 添加项目根目录到路径
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import timm
 import torch
 
-from declining_rate import declining_rate
+from schedule.declining_rate import declining_rate
+import config  # 导入全局配置
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-ASSETS_DIR = os.path.join(BASE_DIR, '..', 'assets', 'profiler_k_b')
+# 从 src/schedule/ 向上两级到达项目根目录
+ASSETS_DIR = os.path.join(BASE_DIR, '..', '..', 'assets', 'profiler_k_b')
+
 with open(os.path.join(ASSETS_DIR, 'device_k_b.json'), 'r') as f:
     device_profiler_data = json.load(f)
 with open(os.path.join(ASSETS_DIR, 'cloud_k_b.json'), 'r') as f:
     cloud_profiler_data = json.load(f)
 
 def init():
-    model = timm.create_model('vit_large_patch16_384', pretrained=False)
+    model = timm.create_model(config.MODEL_NAME, pretrained=config.PRETRAINED)
     model.eval()
     model = model.to(device)
     return model
@@ -79,9 +86,7 @@ def schedule(N, x_0, D_M, bits, num_steps, step, B, SLA):
                 t_device_sum += T_device[ls]
                 t_cloud_sum -= T_cloud[ls]
                 ls += 1
-            # if s in C: print("s in c:", t_device_sum, t_cloud_sum, T_comm[s])
             if s in C and t_device_sum + t_cloud_sum + T_comm[s] < L_sa:
-                print("new_choice:", t_device_sum, t_cloud_sum, T_comm[s])
                 L_sa = t_device_sum + t_cloud_sum + T_comm[s]
                 s_ans = s
         if L_sa <= SLA:

@@ -1,9 +1,13 @@
 import math
+import os
+import sys
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 import torch
 
-from token_pruning import compute_token_schedule, prune_tokens
-from declining_rate import declining_rate
-from schedule import schedule
+from schedule.token_pruning import compute_token_schedule, prune_tokens
+from schedule.declining_rate import declining_rate
+from schedule.schedule import schedule
 
 # input preprocessing
 def _embed(model, image):
@@ -37,17 +41,39 @@ def device_forward(model, image, alpha, split_layer):
 
 
 #  Cloud ：layer (split_layer+1)..N + norm + head
-def cloud_forward(model, x_mid, split_layer):
+def cloud_forward(model, x_mid, split_layer, alpha=0.0):
+    """
+    Cloud-side forward pass
+    
+    Args:
+        model: ViT model
+        x_mid: intermediate tensor from device
+        split_layer: split point (layers 0 to split_layer executed on device)
+        alpha: pruning rate (default 0.0 means no pruning on cloud side)
+    
+    Returns:
+        logits: model output
+    """
     N = len(model.blocks)
-
+    x_0 = model.pos_embed.size(1)
+    
+    # Compute token schedule if pruning is needed
+    if alpha > 0:
+        x_l = compute_token_schedule(alpha, N, x_0)
+    
     x = x_mid
     for l in range(split_layer + 1, N + 1):
         block_idx = l - 1
         x = model.blocks[block_idx](x)
+        
+        # Apply pruning if needed (typically not used on cloud side)
+        if alpha > 0:
+            target_tokens = x_l[l]
+            x = prune_tokens(x, target_tokens)
 
     x = model.norm(x)
 
-    # 取 CLS token
+    # Take CLS token
     logits = model.head(x[:, 0])
 
     return logits
