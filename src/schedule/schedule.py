@@ -29,7 +29,6 @@ def init():
     return model
 
 def device_profiler(x_l, layer): # test_time 输出
-    # ave_k= 0.008612546224559241 ave_b= 0.3093493317437366
     k = device_profiler_data[str(layer - 1)]["k"]  # layer 从1开始，block_idx 从0开始
     b = device_profiler_data[str(layer - 1)]["b"]
     return k * x_l + b
@@ -57,7 +56,7 @@ def schedule(N, x_0, D_M, bits, num_steps, step, B, SLA):
         T_comm[N + 1] = 0.0
         T_comm[0] = (x_0 * D_M * bits) / B * 1000
 
-        C, C_k = set(), 5 # k 设置为 3
+        C, C_k = set(), 5
         C_s = 1
         C.add(C_s)
         for j in range(2, N + 1):

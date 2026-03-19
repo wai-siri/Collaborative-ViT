@@ -77,9 +77,6 @@ logs/
 .env
 .env.local
 
-# Assets directory (profiler data, network traces, etc.)
-assets/
-
 # Documentation
 *.md
 

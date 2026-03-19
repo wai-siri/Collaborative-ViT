@@ -1,13 +1,15 @@
 import math
+import os
+import sys
 import torch
 
-# 导入ToMe官方API
-try:
-    from tome.merge import bipartite_soft_matching, merge_wavg
-    TOME_AVAILABLE = True
-except ImportError:
-    TOME_AVAILABLE = False
-    print("Warning: ToMe library not found. Token merging will use fallback implementation.")
+# 将本地克隆的 ToMe 仓库根目录加入路径（src/ToMe/），使内部 ToMe 包可导入
+_TOME_REPO_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "ToMe")
+if _TOME_REPO_DIR not in sys.path:
+    sys.path.insert(0, _TOME_REPO_DIR)
+
+# 从 src/ToMe/ToMe/merge.py 导入（路径已指向 src/ToMe/，所以 import ToMe.merge 即可）
+from ToMe.merge import bipartite_soft_matching, merge_wavg
 
 
 def compute_token_schedule(alpha, N, x_0):
@@ -52,10 +54,6 @@ def prune_tokens(x, keep_n):
     
     if r <= 0:
         return x
-    
-    if not TOME_AVAILABLE:
-        # Fallback: simple averaging (should not happen if ToMe is installed)
-        raise RuntimeError("ToMe library is required but not available. Please install: pip install git+https://github.com/facebookresearch/ToMe.git")
     
     # Use ToMe's bipartite_soft_matching
     # The metric is the token embeddings themselves (used for similarity)
