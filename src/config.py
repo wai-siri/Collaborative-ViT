@@ -4,6 +4,7 @@
 """
 
 import os
+import glob
 
 # 项目根目录 (src 文件夹的上一级)
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -15,10 +16,35 @@ MODEL_CACHE_DIR = os.path.join(PROJECT_ROOT, 'models', 'pretrained')
 if os.path.exists(MODEL_CACHE_DIR):
     os.environ['TORCH_HOME'] = MODEL_CACHE_DIR
     os.environ['HF_HOME'] = MODEL_CACHE_DIR
+    # 离线模式：禁止 HuggingFace Hub 联网（适用于无外网的云服务器）
+    os.environ['HF_HUB_OFFLINE'] = '1'
+    os.environ['TRANSFORMERS_OFFLINE'] = '1'
     print(f"[Config] Using local model cache: {MODEL_CACHE_DIR}")
 else:
     print(f"[Config] Model cache directory not found, will use default cache")
     print(f"[Config] Expected location: {MODEL_CACHE_DIR}")
+
+# 查找本地预训练权重文件（兼容旧版 .npz 和新版 .safetensors/.bin）
+LOCAL_CHECKPOINT_PATH = None
+_search_dirs = [
+    os.path.join(MODEL_CACHE_DIR, 'hub', 'checkpoints'),
+    MODEL_CACHE_DIR,
+]
+_supported_exts = ['*.npz', '*.safetensors', '*.bin', '*.pth']
+for _d in _search_dirs:
+    if os.path.isdir(_d):
+        for _ext in _supported_exts:
+            _files = glob.glob(os.path.join(_d, _ext))
+            if _files:
+                LOCAL_CHECKPOINT_PATH = _files[0]
+                break
+    if LOCAL_CHECKPOINT_PATH:
+        break
+
+if LOCAL_CHECKPOINT_PATH:
+    print(f"[Config] Found local checkpoint: {LOCAL_CHECKPOINT_PATH}")
+else:
+    print(f"[Config] No local checkpoint found, will try online download")
 
 # 模型配置
 MODEL_NAME = 'vit_large_patch16_384'

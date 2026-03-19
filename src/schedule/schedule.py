@@ -23,7 +23,19 @@ with open(os.path.join(ASSETS_DIR, 'cloud_k_b.json'), 'r') as f:
     cloud_profiler_data = json.load(f)
 
 def init():
-    model = timm.create_model(config.MODEL_NAME, pretrained=config.PRETRAINED)
+    """
+    加载 ViT 模型。优先使用本地缓存的权重文件（支持离线环境），
+    找不到本地权重时才尝试在线下载。
+    """
+    if config.LOCAL_CHECKPOINT_PATH:
+        # 离线模式：先创建空模型，再加载本地权重
+        print(f"[Init] Loading model from local checkpoint: {config.LOCAL_CHECKPOINT_PATH}")
+        model = timm.create_model(config.MODEL_NAME, pretrained=False)
+        model.load_pretrained(config.LOCAL_CHECKPOINT_PATH)
+    else:
+        # 在线模式：由 timm 自动下载
+        print(f"[Init] Downloading model from online...")
+        model = timm.create_model(config.MODEL_NAME, pretrained=True)
     model.eval()
     model = model.to(device)
     return model
