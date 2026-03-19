@@ -3,6 +3,7 @@
 从真实的.list文件解析生成CSV格式的网络trace数据
 """
 
+import sys
 import os
 import pandas as pd
 import numpy as np
@@ -178,9 +179,6 @@ def generate_all_traces(base_dir=None, output_dir=None):
 
 
 if __name__ == "__main__":
-    import sys
-    
-    # 获取项目根目录 (从 src/utils/ 向上两级)
     project_root = Path(__file__).parent.parent.parent
     
     # 生成所有trace文件
