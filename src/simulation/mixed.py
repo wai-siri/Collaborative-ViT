@@ -7,7 +7,8 @@ Mixed Baseline — Fig.7 结果生成器
   - 不是 split computing，不是动态 split point，是 binary selector
   - 固定每层裁剪 23 tokens 的 baseline pruning（论文 Fig.7 口径）
   - 使用 profiler 线性模型分别预测 device / cloud 端逐层延迟
-  - comm_ms = 真实图片文件字节数 / 动态带宽（仅 cloud 路径时 > 0）
+  - comm_ms = 初始 token 张量大小 (x_0 * D_M * bits) / 动态带宽（仅 cloud 路径时 > 0）
+    与 Janus split_layer=0 完全一致，传输的是 embedding 后的 token tensor
   - 使用真实 forward 得到分类结果计算准确率
   - 逐网络场景、逐样本独立判断路径并执行推理
 
@@ -125,22 +126,6 @@ def predict_cloud_time(token_schedule, N):
 
 
 # ── 2.5 cloud 通信相关 ───────────────────────────────────────────────
-def get_image_file_size_bytes(dataset, sample_idx):
-    """
-    从 parquet 数据集中读取第 sample_idx 张图片的原始文件字节数。
-
-    Args:
-        dataset:    ImageNetParquetDataset 实例
-        sample_idx: int, 样本索引
-
-    Returns:
-        int: 图片文件的字节数
-    """
-    row = dataset.df.iloc[sample_idx]
-    img_bytes = row['image']['bytes']
-    return len(img_bytes)
-
-
 def load_bandwidth_series(trace_file):
     """
     从网络 trace CSV 中读取完整带宽序列（Mbps），过滤非法值。
@@ -176,14 +161,19 @@ def get_bandwidth_for_sample(bandwidth_series, sample_idx):
     return bandwidth_series[sample_idx % len(bandwidth_series)]
 
 
-def predict_input_transfer_time(image_size_bytes, bandwidth_mbps):
+def predict_tensor_transfer_time(x_0, D_M, bits, bandwidth_mbps):
     """
-    计算单张真实图片的传输时间。
-    comm_ms = image_size_bytes * 8 / (bandwidth_mbps * 1e6) * 1000
+    计算 cloud 路径的通信时间：传输 embedding 后的 token tensor。
+    comm_ms = x_0 * D_M * bits / (bandwidth_mbps * 1e6) * 1000
+
+    与 Janus scheduler 中 split_layer=0 的通信量计算方式完全一致，
+    确保 Mixed baseline 的 cloud 路径与 Janus cloud-only 退化路径口径统一。
 
     Args:
-        image_size_bytes: int, 图片文件字节数
-        bandwidth_mbps:   float, 当前带宽 (Mbps)
+        x_0:            int, 初始 token 数（含 CLS）
+        D_M:            int, token embedding 维度
+        bits:           int, 数据类型占用 bit 数
+        bandwidth_mbps: float, 当前带宽 (Mbps)
 
     Returns:
         comm_ms: float, 传输时间（毫秒）
@@ -193,8 +183,8 @@ def predict_input_transfer_time(image_size_bytes, bandwidth_mbps):
     """
     if bandwidth_mbps <= 0:
         raise ValueError(f"带宽必须 > 0，当前值: {bandwidth_mbps}")
-    image_size_bits = image_size_bytes * 8
-    comm_ms = image_size_bits / (bandwidth_mbps * 1e6) * 1000
+    transferred_bits = x_0 * D_M * bits
+    comm_ms = transferred_bits / (bandwidth_mbps * 1e6) * 1000
     return comm_ms
 
 
@@ -288,8 +278,9 @@ def choose_path(device_total_ms, cloud_total_ms):
 # 第三部分：单样本 mixed 评估函数
 # =====================================================================
 
-def evaluate_one_sample_mixed(model, image, label, sample_id, dataset,
-                              token_schedule, N, bandwidth_mbps, sla_ms,
+def evaluate_one_sample_mixed(model, image, label, sample_id,
+                              token_schedule, N, x_0, D_M, bits,
+                              bandwidth_mbps, sla_ms,
                               device_pred_ms, cloud_pred_ms):
     """
     对单张图片完成 Mixed 二选一评估：
@@ -304,9 +295,11 @@ def evaluate_one_sample_mixed(model, image, label, sample_id, dataset,
         image:          Tensor (1, 3, 384, 384)
         label:          int, 真实标签
         sample_id:      int, 样本索引
-        dataset:        ImageNetParquetDataset 实例
         token_schedule: dict, {l: keep_n}
         N:              int, Transformer 层数
+        x_0:            int, 初始 token 数（含 CLS）
+        D_M:            int, token embedding 维度
+        bits:           int, 数据类型占用 bit 数
         bandwidth_mbps: float, 当前样本对应的带宽 (Mbps)
         sla_ms:         float, SLA 延迟上限（毫秒）
         device_pred_ms: float, 预计算的 device-only 推理时延（毫秒），整次运行恒定
@@ -319,10 +312,9 @@ def evaluate_one_sample_mixed(model, image, label, sample_id, dataset,
     device_ms = device_pred_ms
     device_total_ms = device_ms
 
-    # ── 第 2 步：算 cloud 候选总时延 ──
+    # ── 第 2 步：算 cloud 候选总时延（通信量按 token tensor 计算） ──
     cloud_ms = cloud_pred_ms
-    image_size_bytes = get_image_file_size_bytes(dataset, sample_id)
-    comm_ms = predict_input_transfer_time(image_size_bytes, bandwidth_mbps)
+    comm_ms = predict_tensor_transfer_time(x_0, D_M, bits, bandwidth_mbps)
     cloud_total_ms = cloud_ms + comm_ms
 
     # ── 第 3 步：比较两者 ──
@@ -508,6 +500,9 @@ def main():
     dev = next(model.parameters()).device
     N = len(model.blocks)           # 24
     x_0 = model.pos_embed.size(1)   # 577
+    D_M = model.pos_embed.size(2)   # 1024
+    dtype = next(model.parameters()).dtype
+    bits = torch.finfo(dtype).bits  # 32
 
     # 1-2. 构建固定 baseline pruning 计划
     token_schedule = build_fixed_baseline_schedule(N, x_0, args.prune_per_layer)
@@ -522,6 +517,8 @@ def main():
     print(f"[Profiler] device_pred_ms = {device_pred_ms:.4f} ms")
     print(f"[Profiler] cloud_pred_ms  = {cloud_pred_ms:.4f} ms")
     print(f"[Logic]  对每个样本: 若 device_total <= cloud_total → 选 device, 否则选 cloud")
+
+    print(f"[Comm]   cloud 路径通信大小按 token tensor 计算: x_0={x_0} * D_M={D_M} * bits={bits} = {x_0*D_M*bits} bits")
 
     # 1-4. 加载数据集
     loader = get_imagenet_loader(args.data_path, batch_size=1, num_workers=0)
@@ -572,8 +569,9 @@ def main():
 
             # 2-4. 调用单样本 mixed 评估
             record = evaluate_one_sample_mixed(
-                model, images, label, sample_idx, dataset,
-                token_schedule, N, bandwidth_mbps, args.sla,
+                model, images, label, sample_idx,
+                token_schedule, N, x_0, D_M, bits,
+                bandwidth_mbps, args.sla,
                 device_pred_ms, cloud_pred_ms)
 
             results.append(record)
