@@ -20,6 +20,23 @@ def _embed(model, image):
 
 
 def device_forward(model, image, alpha, split_layer):
+    """
+    Device-side forward pass.
+    
+    split_layer 语义约定：
+      - split_layer = 0:     cloud-only，device 只做 embedding，不执行任何 transformer layer
+      - 1 <= split_layer <= N: 真实 split，device 执行 layer 1..split_layer
+      - split_layer = N+1:   device-only，device 执行全部 N 层 transformer
+    
+    Args:
+        model: ViT model
+        image: input image tensor (B, 3, 384, 384)
+        alpha: declining rate for token pruning
+        split_layer: split point (0 to N+1)
+    
+    Returns:
+        x: intermediate tensor after device-side layers
+    """
     N = len(model.blocks)
     x_0 = model.pos_embed.size(1)
 
@@ -27,9 +44,11 @@ def device_forward(model, image, alpha, split_layer):
 
     x = _embed(model, image)
 
+    # split_layer <= 0: cloud-only，device 不执行任何 transformer layer
     if split_layer <= 0:
         return x
 
+    # 执行 layer 1..min(split_layer, N)，覆盖 split_layer=N+1 时执行全部 N 层
     for l in range(1, min(split_layer, N) + 1):
         block_idx = l - 1
         x = model.blocks[block_idx](x)
@@ -43,13 +62,21 @@ def device_forward(model, image, alpha, split_layer):
 #  Cloud ：layer (split_layer+1)..N + norm + head
 def cloud_forward(model, x_mid, split_layer, alpha=0.0):
     """
-    Cloud-side forward pass
+    Cloud-side forward pass.
+    
+    split_layer 语义约定：
+      - split_layer = 0:     cloud-only，cloud 从 layer 1 开始执行全部 N 层
+      - 1 <= split_layer <= N: 真实 split，cloud 执行 layer (split_layer+1)..N
+      - split_layer = N+1:   device-only，cloud 不执行任何 transformer layer，只做 norm + head
+    
+    同一个样本的整条推理链中，device 和 cloud 使用同一个 alpha，
+    保证 mixed pruning 贯穿整条 ViT 层序列。
     
     Args:
         model: ViT model
         x_mid: intermediate tensor from device
-        split_layer: split point (layers 0 to split_layer executed on device)
-        alpha: pruning rate (default 0.0 means no pruning on cloud side)
+        split_layer: split point (0 to N+1)
+        alpha: declining rate, 必须与 device_forward 使用同一个值
     
     Returns:
         logits: model output
@@ -57,23 +84,22 @@ def cloud_forward(model, x_mid, split_layer, alpha=0.0):
     N = len(model.blocks)
     x_0 = model.pos_embed.size(1)
     
-    # Compute token schedule if pruning is needed
-    if alpha > 0:
-        x_l = compute_token_schedule(alpha, N, x_0)
+    # 始终计算 token schedule（alpha=0 时 x_l[l]=x_0，不裁剪）
+    x_l = compute_token_schedule(alpha, N, x_0)
     
     x = x_mid
+    # split_layer >= N+1 时不执行任何 transformer layer
+    # split_layer = 0 时从 layer 1 开始执行全部 N 层
     for l in range(split_layer + 1, N + 1):
         block_idx = l - 1
         x = model.blocks[block_idx](x)
         
-        # Apply pruning if needed (typically not used on cloud side)
-        if alpha > 0:
-            target_tokens = x_l[l]
-            x = prune_tokens(x, target_tokens)
+        # 对 cloud 端执行的每一层也应用同一个 alpha 的 pruning schedule
+        target_tokens = x_l[l]
+        x = prune_tokens(x, target_tokens)
 
+    # norm + classification head（CLS token）
     x = model.norm(x)
-
-    # Take CLS token
     logits = model.head(x[:, 0])
 
     return logits
@@ -113,7 +139,7 @@ def run_split_inference(model, image, bandwidth_bps, SLA):
     print(f"[Device] 中间张量 shape: {x_mid_shape}")
 
     with torch.no_grad():
-        logits = cloud_forward(model, x_mid, split_layer)
+        logits = cloud_forward(model, x_mid, split_layer, alpha)
 
     print(f"[Cloud] logits shape: {tuple(logits.shape)}")
 

@@ -50,7 +50,41 @@ def cloud_profiler(x_l, layer): # 虚拟数据
     b = cloud_profiler_data[str(layer - 1)]["b"]
     return k * x_l + b
 
-def schedule(N, x_0, D_M, bits, num_steps, step, B, SLA):
+def schedule(N, x_0, D_M, bits, num_steps, step, B, SLA, split_k=5):
+    """
+    Janus 动态调度器（论文 Algorithm 1）。
+    
+    遍历所有 alpha（从 0 到 alpha_max），对每个 alpha 用 fine-to-coarse
+    策略生成候选 split point 集合 C，找使总时延最小的 split point。
+    
+    - 如果存在满足 SLA 的 (alpha, split_layer) 组合，返回第一个满足的解。
+    - 如果不存在满足 SLA 的组合，返回全局总时延最低的 (alpha, split_layer)。
+      （论文明确说明调度器在 pruning level 和 split point 间联合选择配置）
+    
+    split_layer 语义：
+      - 0:     cloud-only
+      - 1..N:  真实 split inference
+      - N+1:   device-only
+    
+    Args:
+        N:          int, Transformer 层数
+        x_0:        int, 初始 token 数（含 CLS）
+        D_M:        int, token embedding 维度
+        bits:       int, 数据类型占用 bit 数
+        num_steps:  int, alpha 步数
+        step:       float, alpha 步长
+        B:          float, 当前带宽 (bps)
+        SLA:        float, 延迟上限 (ms)
+        split_k:    int, fine-to-coarse 候选点密度参数（论文参数 k），默认 5
+    
+    Returns:
+        (alpha, split_layer): 最优配置
+    """
+    # 全局最优 fallback：当没有任何配置满足 SLA 时，返回总时延最低的配置
+    best_fail_total_ms = float('inf')
+    best_fail_alpha = 0.0
+    best_fail_split = 0
+
     for i in range(num_steps):
         a = i * step
         # 更新出 {x_l | l = 1 ... N}: number of tokens at layer l
@@ -62,17 +96,18 @@ def schedule(N, x_0, D_M, bits, num_steps, step, B, SLA):
             for l in range(1, N + 1):
                 delta_x_l = math.floor(2 ** (a * (N - (l - 1))))
                 tx0 = tx0 - delta_x_l
-                x_l[l]=tx0
+                x_l[l]=max(tx0, 1)
 
         T_device, T_cloud, T_comm = {}, {}, {}
-        T_comm[N + 1] = 0.0
-        T_comm[0] = (x_0 * D_M * bits) / B * 1000
+        T_comm[N + 1] = 0.0  # device-only: 无通信
+        T_comm[0] = (x_0 * D_M * bits) / B * 1000  # cloud-only: 传输初始 token 表示
 
-        C, C_k = set(), 5
+        # fine-to-coarse 候选 split point 集合
+        C = set()
         C_s = 1
         C.add(C_s)
         for j in range(2, N + 1):
-            C_s += math.ceil(j / C_k)
+            C_s += math.ceil(j / split_k)
             if C_s > N: break
             C.add(C_s)
 
@@ -81,12 +116,12 @@ def schedule(N, x_0, D_M, bits, num_steps, step, B, SLA):
             T_cloud[l] = cloud_profiler(x_l[l], l)
             if l in C:
                 T_comm[l] = (x_l[l] * D_M * bits) / B * 1000
-                # print(T_comm[l], x_l[l], D_M, bits, B)
 
+        # 加入边界候选点：0 (cloud-only) 和 N+1 (device-only)
         C.add(0)
         C.add(N + 1)
 
-        # 预更新
+        # 滑动窗口计算 device_sum 和 cloud_sum
         t_device_sum, t_cloud_sum = 0.0, 0.0
         for j in range(1, N + 1): t_cloud_sum += T_cloud[j]
 
@@ -100,9 +135,19 @@ def schedule(N, x_0, D_M, bits, num_steps, step, B, SLA):
             if s in C and t_device_sum + t_cloud_sum + T_comm[s] < L_sa:
                 L_sa = t_device_sum + t_cloud_sum + T_comm[s]
                 s_ans = s
+
+        # 更新全局最优 fallback
+        if s_ans >= 0 and L_sa < best_fail_total_ms:
+            best_fail_total_ms = L_sa
+            best_fail_alpha = a
+            best_fail_split = s_ans
+
+        # 如果当前 alpha 的最优 split 满足 SLA，立即返回
         if L_sa <= SLA:
             return a, s_ans
-    return num_steps * step, 0
+
+    # 没有任何配置满足 SLA → 返回全局总时延最低的配置
+    return best_fail_alpha, best_fail_split
 
 if __name__ == '__main__':
     model = init()
