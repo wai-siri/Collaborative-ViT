@@ -22,11 +22,10 @@ Mixed Baseline — Fig.7 结果生成器
   - 选 cloud-only 时：device_ms = 0, cloud_ms > 0, comm_ms > 0
 
 用法：
-  python src/simulation/mixed.py [--data_path DATA] [--sla SLA_MS]
-                                  [--prune_per_layer 23] [--output_dir DIR]
+  python src/simulation/mixed.py
+  所有参数通过 config.py 统一配置
 """
 
-import argparse
 import os
 import sys
 
@@ -52,18 +51,10 @@ METHOD = "mixed"
 
 # ── 主流程 ────────────────────────────────────────────────────────────
 def main():
-    parser = argparse.ArgumentParser(
-        description="Mixed Baseline — Fig.7 Result Generator (binary selector)")
-    parser.add_argument("--data_path", type=str,
-                        default=os.path.join(config.PROJECT_ROOT, config.IMAGENET_DATA_PATH),
-                        help="ImageNet parquet 文件路径")
-    parser.add_argument("--sla", type=float, default=config.DEFAULT_SLA,
-                        help="SLA 延迟上限（毫秒），默认 300ms")
-    parser.add_argument("--prune_per_layer", type=int, default=23,
-                        help="每层固定裁剪 token 数（论文 Fig.7 baseline = 23）")
-    parser.add_argument("--output_dir", type=str, default=None,
-                        help="输出目录（默认 results/mixed/）")
-    args = parser.parse_args()
+    data_path = os.path.join(config.PROJECT_ROOT, config.IMAGENET_DATA_PATH)
+    sla = config.DEFAULT_SLA
+    prune_per_layer = config.PRUNE_PER_LAYER
+    output_dir = os.path.join(config.PROJECT_ROOT, "results", "mixed")
 
     # ================================================================
     # Phase 1: 执行一次 forward 推理，缓存准确率相关结果
@@ -82,9 +73,9 @@ def main():
     bits = torch.finfo(dtype).bits  # 32
 
     # 1-2. 构建固定 baseline pruning 计划
-    token_schedule = build_fixed_baseline_schedule(N, x_0, args.prune_per_layer)
+    token_schedule = build_fixed_baseline_schedule(N, x_0, prune_per_layer)
     print(f"[Model]  {config.MODEL_NAME}, N={N}, x_0={x_0}, device={dev}")
-    print(f"[Config] prune_per_layer={args.prune_per_layer}, SLA={args.sla}ms")
+    print(f"[Config] prune_per_layer={prune_per_layer}, SLA={sla}ms")
     print(f"[Schedule] layer 1 keep={token_schedule[1]}, "
           f"layer {N} keep={token_schedule[N]}")
 
@@ -97,7 +88,7 @@ def main():
     print(f"[Comm]   cloud 路径通信大小按 token tensor 计算: x_0={x_0} * D_M={D_M} * bits={bits} = {x_0*D_M*bits} bits")
 
     # 1-4. 加载数据集
-    loader = get_imagenet_loader(args.data_path, batch_size=1, num_workers=0)
+    loader = get_imagenet_loader(data_path, batch_size=1, num_workers=0)
     total_samples = len(loader.dataset)
     print(f"[Data]   {total_samples} samples loaded")
 
@@ -132,11 +123,6 @@ def main():
     # Phase 2: 对每个网络场景，逐样本按带宽计算路径选择和时延
     #           分别保存 records + summary
     # ================================================================
-    if args.output_dir is None:
-        output_dir = os.path.join(config.PROJECT_ROOT, "results", "mixed")
-    else:
-        output_dir = args.output_dir
-
     trace_dir = os.path.join(config.PROJECT_ROOT, config.NETWORK_TRACE_DIR)
 
     print(f"\n[Phase 2] 按 {len(NETWORK_SCENARIOS)} 个网络场景分别计算路径选择 ...")
@@ -189,7 +175,7 @@ def main():
                 final_total_ms = cloud_total_ms
                 cloud_count += 1
 
-            violate = 1 if final_total_ms > args.sla else 0
+            violate = 1 if final_total_ms > sla else 0
 
             scenario_results.append({
                 "sample_id": sid,

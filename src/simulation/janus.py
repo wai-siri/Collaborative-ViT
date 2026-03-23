@@ -19,11 +19,10 @@ Janus — Fig.7 结果生成器
     janus_{scenario}_summary.csv   — 汇总指标（与 baseline 完全一致）
 
 用法：
-  python src/simulation/janus.py [--data_path DATA] [--sla 300]
-                                  [--split_k 5] [--output_dir DIR]
+  python src/simulation/janus.py
+  所有参数通过 config.py 统一配置
 """
 
-import argparse
 import os
 import sys
 
@@ -81,7 +80,6 @@ def predict_janus_latency(N, x_0, D_M, bits, alpha, split_layer, bandwidth_bps):
     Returns:
         dict: {device_ms, cloud_ms, comm_ms, total_ms}
     """
-    # 使用与 scheduler / 真实 forward 完全相同的 token schedule
     x_l = compute_token_schedule(alpha, N, x_0)
 
     # ── device_ms ──
@@ -105,7 +103,7 @@ def predict_janus_latency(N, x_0, D_M, bits, alpha, split_layer, bandwidth_bps):
         transferred_bits = x_0 * D_M * bits
         comm_ms = transferred_bits / bandwidth_bps * 1000
     else:
-        # 真实 split: 传输 split 后的中间 token 表示
+        # split: 传输 split 后的中间 token 表示
         transferred_bits = x_l[split_layer] * D_M * bits
         comm_ms = transferred_bits / bandwidth_bps * 1000
 
@@ -225,18 +223,10 @@ def run_janus_sample(model, image, label, sample_id,
 
 # ── 主流程 ────────────────────────────────────────────────────────────
 def main():
-    parser = argparse.ArgumentParser(
-        description="Janus — Fig.7 Result Generator (dynamic pruning + splitting)")
-    parser.add_argument("--data_path", type=str,
-                        default=os.path.join(config.PROJECT_ROOT, config.IMAGENET_DATA_PATH),
-                        help="ImageNet parquet 文件路径")
-    parser.add_argument("--sla", type=float, default=config.DEFAULT_SLA,
-                        help="SLA 延迟上限（毫秒），默认 300ms")
-    parser.add_argument("--split_k", type=int, default=5,
-                        help="fine-to-coarse 候选点密度参数（论文参数 k），默认 5")
-    parser.add_argument("--output_dir", type=str, default=None,
-                        help="输出目录（默认 results/janus/）")
-    args = parser.parse_args()
+    data_path = os.path.join(config.PROJECT_ROOT, config.IMAGENET_DATA_PATH)
+    sla = config.DEFAULT_SLA
+    split_k = config.SPLIT_K
+    output_dir = os.path.join(config.PROJECT_ROOT, "results", "janus")
 
     # ================================================================
     # Phase 1: 初始化
@@ -260,23 +250,18 @@ def main():
     num_steps = int(a_max / step) + 1
 
     print(f"[Model]  {config.MODEL_NAME}, N={N}, x_0={x_0}, D_M={D_M}, bits={bits}")
-    print(f"[Config] SLA={args.sla}ms, split_k={args.split_k}")
+    print(f"[Config] SLA={sla}ms, split_k={split_k}")
     print(f"[Scheduler] alpha_max={a_max:.4f}, step={step}, num_steps={num_steps}")
     print(f"[Comm]   通信大小按中间 token 张量大小计算（非原图字节数）")
 
     # 1-3. 加载数据集
-    loader = get_imagenet_loader(args.data_path, batch_size=1, num_workers=0)
+    loader = get_imagenet_loader(data_path, batch_size=1, num_workers=0)
     total_samples = len(loader.dataset)
     print(f"[Data]   {total_samples} samples loaded")
 
     # ================================================================
     # Phase 2: 逐网络场景、逐样本调度并推理
     # ================================================================
-    if args.output_dir is None:
-        output_dir = os.path.join(config.PROJECT_ROOT, "results", "janus")
-    else:
-        output_dir = args.output_dir
-
     trace_dir = os.path.join(config.PROJECT_ROOT, config.NETWORK_TRACE_DIR)
 
     print(f"\n[Phase 2] 逐网络场景遍历数据集，每样本独立调度 ...")
@@ -316,7 +301,7 @@ def main():
             record = run_janus_sample(
                 model, images, label, sample_idx,
                 N, x_0, D_M, bits, num_steps, step,
-                observed_bw, estimated_bw, args.sla, args.split_k)
+                observed_bw, estimated_bw, sla, split_k)
 
             results.append(record)
 

@@ -10,7 +10,7 @@ import timm
 import torch
 
 from schedule.declining_rate import declining_rate
-import config  # 导入全局配置
+import config
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -23,10 +23,6 @@ with open(os.path.join(ASSETS_DIR, 'cloud_k_b.json'), 'r') as f:
     cloud_profiler_data = json.load(f)
 
 def init():
-    """
-    加载 ViT 模型。优先使用本地缓存的权重文件（支持离线环境），
-    找不到本地权重时才尝试在线下载。
-    """
     if config.LOCAL_CHECKPOINT_PATH:
         # 离线模式：先创建空模型，再加载本地权重
         print(f"[Init] Loading model from local checkpoint: {config.LOCAL_CHECKPOINT_PATH}")
@@ -40,46 +36,17 @@ def init():
     model = model.to(device)
     return model
 
-def device_profiler(x_l, layer): # test_time 输出
+def device_profiler(x_l, layer):
     k = device_profiler_data[str(layer - 1)]["k"]  # layer 从1开始，block_idx 从0开始
     b = device_profiler_data[str(layer - 1)]["b"]
     return k * x_l + b
 
-def cloud_profiler(x_l, layer): # 虚拟数据
+def cloud_profiler(x_l, layer):
     k = cloud_profiler_data[str(layer - 1)]["k"]
     b = cloud_profiler_data[str(layer - 1)]["b"]
     return k * x_l + b
 
 def schedule(N, x_0, D_M, bits, num_steps, step, B, SLA, split_k=5):
-    """
-    Janus 动态调度器（论文 Algorithm 1）。
-    
-    遍历所有 alpha（从 0 到 alpha_max），对每个 alpha 用 fine-to-coarse
-    策略生成候选 split point 集合 C，找使总时延最小的 split point。
-    
-    - 如果存在满足 SLA 的 (alpha, split_layer) 组合，返回第一个满足的解。
-    - 如果不存在满足 SLA 的组合，返回全局总时延最低的 (alpha, split_layer)。
-      （论文明确说明调度器在 pruning level 和 split point 间联合选择配置）
-    
-    split_layer 语义：
-      - 0:     cloud-only
-      - 1..N:  真实 split inference
-      - N+1:   device-only
-    
-    Args:
-        N:          int, Transformer 层数
-        x_0:        int, 初始 token 数（含 CLS）
-        D_M:        int, token embedding 维度
-        bits:       int, 数据类型占用 bit 数
-        num_steps:  int, alpha 步数
-        step:       float, alpha 步长
-        B:          float, 当前带宽 (bps)
-        SLA:        float, 延迟上限 (ms)
-        split_k:    int, fine-to-coarse 候选点密度参数（论文参数 k），默认 5
-    
-    Returns:
-        (alpha, split_layer): 最优配置
-    """
     # 全局最优 fallback：当没有任何配置满足 SLA 时，返回总时延最低的配置
     best_fail_total_ms = float('inf')
     best_fail_alpha = 0.0

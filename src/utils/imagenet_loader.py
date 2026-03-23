@@ -3,20 +3,16 @@ ImageNet数据加载器
 从parquet格式文件加载ImageNet验证集数据
 """
 
-import pandas as pd
-from PIL import Image
 import io
+import os
+import sys
+from pathlib import Path
+
+import pandas as pd
 import torch
+from PIL import Image
 from torch.utils.data import Dataset, DataLoader
 from torchvision import transforms
-
-# 检查parquet依赖
-try:
-    import pyarrow
-except ImportError:
-    print("Warning: pyarrow not installed. Installing...")
-    print("Please run: pip install pyarrow")
-    print("Or: conda install pyarrow")
 
 
 class ImageNetParquetDataset(Dataset):
@@ -134,21 +130,13 @@ def verify_imagenet_data(parquet_path):
 
 
 if __name__ == "__main__":
-    import sys
-    from pathlib import Path
-    
-    # 默认路径
-    default_path = "data/validation-00000-of-00014.parquet"
-    
-    # 如果提供了命令行参数
-    if len(sys.argv) > 1:
-        parquet_path = sys.argv[1]
-    else:
-        parquet_path = default_path
-    
-    # 验证数据
+    SRC_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    sys.path.insert(0, SRC_DIR)
+    import config
+
+    parquet_path = os.path.join(config.PROJECT_ROOT, config.IMAGENET_DATA_PATH)
+
     if Path(parquet_path).exists():
         verify_imagenet_data(parquet_path)
     else:
         print(f"Error: File not found: {parquet_path}")
-        print(f"Usage: python {sys.argv[0]} [parquet_path]")

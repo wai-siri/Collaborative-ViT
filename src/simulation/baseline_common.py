@@ -32,7 +32,7 @@ from schedule.split_inference import _embed
 # ── 6 个网络场景（LTE/5G × static/walking/driving） ──────────────────
 # bw_floor: 仅用于数值保护（防止 trace 中接近 0 的值导致除零），统一用很小正数
 # cold_start_bw: 论文中冷启动带宽估计值（Mbps），sample_idx==0 时使用
-#   LTE cold_start_bw = 7.6 Mbps, 5G cold_start_bw = 14.7 Mbps
+# LTE cold_start_bw = 7.6 Mbps, 5G cold_start_bw = 14.7 Mbps
 NETWORK_SCENARIOS = [
     {"network_type": "LTE", "scenario": "static",  "trace_file": "static_lte_trace.csv",  "bw_floor": 0.01, "cold_start_bw": 7.6},
     {"network_type": "LTE", "scenario": "walking", "trace_file": "walking_lte_trace.csv", "bw_floor": 0.01, "cold_start_bw": 7.6},
@@ -146,8 +146,6 @@ def predict_tensor_transfer_time(x_0, D_M, bits, bandwidth_mbps):
     Raises:
         ValueError: 如果 bandwidth_mbps <= 0
     """
-    if bandwidth_mbps <= 0:
-        raise ValueError(f"带宽必须 > 0，当前值: {bandwidth_mbps}")
     transferred_bits = x_0 * D_M * bits
     comm_ms = transferred_bits / (bandwidth_mbps * 1e6) * 1000
     return comm_ms

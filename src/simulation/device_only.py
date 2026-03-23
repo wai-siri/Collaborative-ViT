@@ -15,11 +15,10 @@ Device-Only Baseline — Fig.7 结果生成器
     device_only_{scenario}_summary.csv   — 汇总指标
 
 用法：
-  python src/simulation/device_only.py [--data_path DATA] [--sla SLA_MS]
-                                       [--prune_per_layer 23] [--output_dir DIR]
+  python src/simulation/device_only.py
+  所有参数通过 config.py 统一配置
 """
 
-import argparse
 import os
 import sys
 
@@ -45,18 +44,10 @@ METHOD = "device_only"
 
 # ── 主流程 ────────────────────────────────────────────────────────────
 def main():
-    parser = argparse.ArgumentParser(
-        description="Device-Only Baseline — Fig.7 Result Generator")
-    parser.add_argument("--data_path", type=str,
-                        default=os.path.join(config.PROJECT_ROOT, config.IMAGENET_DATA_PATH),
-                        help="ImageNet parquet 文件路径")
-    parser.add_argument("--sla", type=float, default=config.DEFAULT_SLA,
-                        help="SLA 延迟上限（毫秒），默认 300ms")
-    parser.add_argument("--prune_per_layer", type=int, default=23,
-                        help="每层固定裁剪 token 数（论文 Fig.7 baseline = 23）")
-    parser.add_argument("--output_dir", type=str, default=None,
-                        help="输出目录（默认 results/device_only/）")
-    args = parser.parse_args()
+    data_path = os.path.join(config.PROJECT_ROOT, config.IMAGENET_DATA_PATH)
+    sla = config.DEFAULT_SLA
+    prune_per_layer = config.PRUNE_PER_LAYER
+    output_dir = os.path.join(config.PROJECT_ROOT, "results", "device_only")
 
     # ================================================================
     # Phase 1: 执行一次 Device-Only 推理，得到 base_results
@@ -72,22 +63,22 @@ def main():
     x_0 = model.pos_embed.size(1)   # 577
 
     # 1-2. 构建固定 baseline pruning 计划
-    token_schedule = build_fixed_baseline_schedule(N, x_0, args.prune_per_layer)
+    token_schedule = build_fixed_baseline_schedule(N, x_0, prune_per_layer)
     print(f"[Model]  {config.MODEL_NAME}, N={N}, x_0={x_0}, device={dev}")
-    print(f"[Config] prune_per_layer={args.prune_per_layer}, SLA={args.sla}ms")
+    print(f"[Config] prune_per_layer={prune_per_layer}, SLA={sla}ms")
     print(f"[Schedule] layer 1 keep={token_schedule[1]}, "
           f"layer {N} keep={token_schedule[N]}")
 
     # 1-3. 加载数据集
-    loader = get_imagenet_loader(args.data_path, batch_size=1, num_workers=0)
+    loader = get_imagenet_loader(data_path, batch_size=1, num_workers=0)
     total_samples = len(loader.dataset)
     print(f"[Data]   {total_samples} samples loaded")
 
-    # 1-4. 逐样本推理（只跑一次）
+    # 1-4. 逐样本推理
     device_ms_value = predict_device_time(token_schedule, N)
     base_results = []
     for sample_idx, (images, labels) in enumerate(
-            tqdm(loader, desc="Device-Only Inference", total=total_samples)):
+            tqdm(loader, desc="Device-Only Inference", total=total_samples)): # 进度条包装器
         images = images.to(dev)
         label = int(labels.item())
 
@@ -96,7 +87,7 @@ def main():
                 model, images, token_schedule, N)
 
         correct = 1 if pred_label == label else 0
-        violate = 1 if device_ms_value > args.sla else 0
+        violate = 1 if device_ms_value > sla else 0
         base_results.append({
             "sample_id": sample_idx,
             "device_ms": device_ms_value,
@@ -124,11 +115,6 @@ def main():
     # ================================================================
     # Phase 2: 展开到 6 个网络场景，分别保存 records + summary
     # ================================================================
-    if args.output_dir is None:
-        output_dir = os.path.join(config.PROJECT_ROOT, "results", "device_only")
-    else:
-        output_dir = args.output_dir
-
     trace_dir = os.path.join(config.PROJECT_ROOT, config.NETWORK_TRACE_DIR)
 
     print(f"\n[Phase 2] 展开到 {len(NETWORK_SCENARIOS)} 个网络场景 ...")
@@ -137,16 +123,16 @@ def main():
         scenario = sc["scenario"]
         tag = f"{net_type.lower()}_{scenario}"
 
-        # 读取该场景完整带宽序列（与 cloud_only / mixed / janus 语义一致）
+        # 读取该场景完整带宽序列
         trace_path = os.path.join(trace_dir, sc["trace_file"])
         bw_series = load_bandwidth_series(trace_path, bw_floor=sc["bw_floor"])
 
         cold_start_bw = sc["cold_start_bw"]
 
-        # 逐样本复制 base 记录，并按样本索引映射带宽（不修改 base_results）
+        # 逐样本复制 base 记录，并按样本索引映射带宽
         scenario_results = []
         for r in base_results:
-            rec = dict(r)  # 浅拷贝一份，不污染原始数据
+            rec = dict(r)  # 浅拷贝一份
             sid = rec["sample_id"]
             rec["observed_bandwidth_mbps"] = get_bandwidth_for_sample(
                 bw_series, sid)
