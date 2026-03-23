@@ -24,15 +24,10 @@ Janus — Fig.7 结果生成器
 """
 
 import argparse
-import csv
-import math
 import os
 import sys
 
-import pandas as pd
-
 # ── 路径设置 ──────────────────────────────────────────────────────────
-# 将 src/ 加入 sys.path，使 schedule / utils / config 等模块可以直接 import
 SRC_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, SRC_DIR)
 
@@ -43,67 +38,18 @@ import config
 from schedule.schedule import init, device_profiler, cloud_profiler, schedule
 from schedule.declining_rate import declining_rate
 from schedule.token_pruning import compute_token_schedule
-from schedule.split_inference import device_forward, cloud_forward, _embed
-
-
-# =====================================================================
-# 第一部分：常量定义
-# =====================================================================
-
-# ── 6 个网络场景（与 Device-Only / Cloud-Only / Mixed 保持一致） ──────
-NETWORK_SCENARIOS = [
-    {"network_type": "LTE", "scenario": "static",  "trace_file": "static_lte_trace.csv"},
-    {"network_type": "LTE", "scenario": "walking", "trace_file": "walking_lte_trace.csv"},
-    {"network_type": "LTE", "scenario": "driving", "trace_file": "driving_lte_trace.csv"},
-    {"network_type": "5G",  "scenario": "static",  "trace_file": "static_5g_trace.csv"},
-    {"network_type": "5G",  "scenario": "walking", "trace_file": "walking_5g_trace.csv"},
-    {"network_type": "5G",  "scenario": "driving", "trace_file": "driving_5g_trace.csv"},
-]
+from schedule.split_inference import device_forward, cloud_forward
+from utils.imagenet_loader import get_imagenet_loader
+from simulation.baseline_common import (
+    NETWORK_SCENARIOS, load_bandwidth_series, get_bandwidth_for_sample,
+    estimate_bandwidth, summarize, save_records_csv, save_summary_csv,
+)
 
 METHOD = "janus"
 
 
 # =====================================================================
-# 第二部分：带宽读取
-# =====================================================================
-
-def load_bandwidth_series(trace_file):
-    """
-    从网络 trace CSV 中读取完整带宽序列（Mbps），过滤非法值。
-
-    Args:
-        trace_file: str, trace 文件的完整路径
-
-    Returns:
-        list[float]: 带宽序列（Mbps），已过滤掉 <= 0 的值
-
-    Raises:
-        ValueError: 如果过滤后序列为空
-    """
-    df = pd.read_csv(trace_file)
-    series = [float(v) for v in df["bandwidth_mbps"] if float(v) > 0]
-    if len(series) == 0:
-        raise ValueError(f"Trace file {trace_file} 中无有效带宽值（全部 <= 0）")
-    return series
-
-
-def get_bandwidth_for_sample(bandwidth_series, sample_idx):
-    """
-    按样本索引循环映射到 trace 带宽序列中的某个时间步。
-    trace 比样本少时自动循环；trace 比样本长时只用前面一段。
-
-    Args:
-        bandwidth_series: list[float], 带宽序列
-        sample_idx:       int, 样本索引
-
-    Returns:
-        float: 该样本对应的带宽 (Mbps)
-    """
-    return bandwidth_series[sample_idx % len(bandwidth_series)]
-
-
-# =====================================================================
-# 第三部分：Janus 时延预测（任务 4-6）
+# Janus 特有：时延预测
 # =====================================================================
 
 def predict_janus_latency(N, x_0, D_M, bits, alpha, split_layer, bandwidth_bps):
@@ -174,7 +120,7 @@ def predict_janus_latency(N, x_0, D_M, bits, alpha, split_layer, bandwidth_bps):
 
 
 # =====================================================================
-# 第四部分：Janus 真实推理（任务 7-8）
+# Janus 特有：真实推理
 # =====================================================================
 
 def run_janus_inference(model, image, alpha, split_layer):
@@ -207,47 +153,49 @@ def run_janus_inference(model, image, alpha, split_layer):
 
 
 # =====================================================================
-# 第五部分：单样本评估（任务 14）
+# Janus 特有：单样本评估
 # =====================================================================
 
 def run_janus_sample(model, image, label, sample_id,
                      N, x_0, D_M, bits, num_steps, step,
-                     bandwidth_mbps, sla_ms, split_k):
+                     observed_bandwidth_mbps, estimated_bandwidth_mbps,
+                     sla_ms, split_k):
     """
     对单个样本完成 Janus 完整评估流程：
       1. 取模型结构参数 N, x_0, D_M, bits
-      2. 用当前带宽调用 scheduler
+      2. 用估计带宽调用 scheduler
       3. 用 (alpha, split_layer) 预测 device_ms/cloud_ms/comm_ms/total_ms
       4. 用真实 split inference 算 pred_label
       5. 计算 correct / violate
       6. 返回结果 dict
 
     Args:
-        model:          timm ViT 模型
-        image:          Tensor (1, 3, 384, 384)
-        label:          int, 真实标签
-        sample_id:      int, 样本索引
-        N:              int, Transformer 层数
-        x_0:            int, 初始 token 数
-        D_M:            int, token embedding 维度
-        bits:           int, 数据类型占用 bit 数
-        num_steps:      int, alpha 步数
-        step:           float, alpha 步长
-        bandwidth_mbps: float, 当前样本对应的带宽 (Mbps)
-        sla_ms:         float, SLA 延迟上限（毫秒）
-        split_k:        int, fine-to-coarse 候选点密度参数
+        model:                     timm ViT 模型
+        image:                     Tensor (1, 3, 384, 384)
+        label:                     int, 真实标签
+        sample_id:                 int, 样本索引
+        N:                         int, Transformer 层数
+        x_0:                       int, 初始 token 数
+        D_M:                       int, token embedding 维度
+        bits:                      int, 数据类型占用 bit 数
+        num_steps:                 int, alpha 步数
+        step:                      float, alpha 步长
+        observed_bandwidth_mbps:   float, 当前 trace 时间步的真实带宽 (Mbps)，仅记录
+        estimated_bandwidth_mbps:  float, 调和平均估计带宽 (Mbps)，用于 scheduler 和 comm_ms
+        sla_ms:                    float, SLA 延迟上限（毫秒）
+        split_k:                   int, fine-to-coarse 候选点密度参数
 
     Returns:
         dict: 包含所有结果字段的记录
     """
-    # 带宽转换：Mbps -> bps
-    bandwidth_bps = bandwidth_mbps * 1e6
+    # 估计带宽转换：Mbps -> bps
+    bandwidth_bps = estimated_bandwidth_mbps * 1e6
 
-    # ── 1. 调用 scheduler ──
+    # ── 1. 调用 scheduler（基于估计带宽） ──
     alpha, split_layer = schedule(
         N, x_0, D_M, bits, num_steps, step, bandwidth_bps, sla_ms, split_k)
 
-    # ── 2. 预测时延（profiler 线性模型） ──
+    # ── 2. 预测时延（profiler 线性模型，基于估计带宽） ──
     latency = predict_janus_latency(
         N, x_0, D_M, bits, alpha, split_layer, bandwidth_bps)
 
@@ -268,135 +216,14 @@ def run_janus_sample(model, image, label, sample_id,
         "pred_label": pred_label,
         "true_label": label,
         "violate": violate,
-        "bandwidth_mbps": bandwidth_mbps,
+        "observed_bandwidth_mbps": observed_bandwidth_mbps,
+        "estimated_bandwidth_mbps": estimated_bandwidth_mbps,
         "alpha": alpha,
         "split_layer": split_layer,
     }
 
 
-# =====================================================================
-# 第六部分：汇总与保存（任务 15-16）
-# =====================================================================
-
-def summarize(results, network_type, scenario):
-    """
-    计算汇总指标，包含场景元信息。格式与 baseline 完全一致。
-
-    Returns:
-        dict: 包含 network_type, scenario, method, num_samples,
-              avg_device_ms, avg_cloud_ms, avg_comm_ms, avg_total_ms,
-              accuracy, violation_ratio, throughput_fps
-    """
-    n = len(results)
-    avg_device_ms = sum(r["device_ms"] for r in results) / n
-    avg_cloud_ms = sum(r["cloud_ms"] for r in results) / n
-    avg_comm_ms = sum(r["comm_ms"] for r in results) / n
-    avg_total_ms = sum(r["total_time_ms"] for r in results) / n
-    accuracy = sum(r["correct"] for r in results) / n
-    violation_ratio = sum(r["violate"] for r in results) / n
-    sum_total = sum(r["total_time_ms"] for r in results)
-    throughput_fps = n / (sum_total / 1000.0) if sum_total > 0 else 0.0
-
-    return {
-        "network_type": network_type,
-        "scenario": scenario,
-        "method": METHOD,
-        "num_samples": n,
-        "avg_device_ms": avg_device_ms,
-        "avg_cloud_ms": avg_cloud_ms,
-        "avg_comm_ms": avg_comm_ms,
-        "avg_total_ms": avg_total_ms,
-        "accuracy": accuracy,
-        "violation_ratio": violation_ratio,
-        "throughput_fps": throughput_fps,
-    }
-
-
-# ── 保存逐样本明细到 CSV（比 baseline 多 alpha, split_layer 两列） ────
-RECORD_COLUMNS = [
-    "sample_id", "network_type", "scenario", "bandwidth_mbps", "method",
-    "device_ms", "cloud_ms", "comm_ms", "total_time_ms",
-    "correct", "pred_label", "true_label", "violate",
-    "alpha", "split_layer",
-]
-
-
-def save_records_csv(results, network_type, scenario, output_path):
-    """
-    将结果保存为带场景标签的逐样本明细 CSV。
-    每行的 bandwidth_mbps 从 results[i]["bandwidth_mbps"] 读取（逐样本动态带宽）。
-
-    Args:
-        results:        list[dict], 推理结果
-        network_type:   str, "LTE" / "5G"
-        scenario:       str, "static" / "walking" / "driving"
-        output_path:    str, 输出文件路径
-    """
-    os.makedirs(os.path.dirname(output_path), exist_ok=True)
-
-    with open(output_path, "w", newline="", encoding="utf-8") as f:
-        writer = csv.writer(f)
-        writer.writerow(RECORD_COLUMNS)
-        for r in results:
-            writer.writerow([
-                r["sample_id"],
-                network_type,
-                scenario,
-                f"{r['bandwidth_mbps']:.4f}",
-                METHOD,
-                f"{r['device_ms']:.4f}",
-                f"{r['cloud_ms']:.4f}",
-                f"{r['comm_ms']:.4f}",
-                f"{r['total_time_ms']:.4f}",
-                r["correct"],
-                r["pred_label"],
-                r["true_label"],
-                r["violate"],
-                f"{r['alpha']:.4f}",
-                r["split_layer"],
-            ])
-
-    print(f"  [Save] records -> {output_path}")
-
-
-# ── 保存汇总指标到 CSV（与 baseline 完全一致） ────────────────────────
-SUMMARY_COLUMNS = [
-    "network_type", "scenario", "method", "num_samples",
-    "avg_device_ms", "avg_cloud_ms", "avg_comm_ms", "avg_total_ms",
-    "accuracy", "violation_ratio", "throughput_fps",
-]
-
-
-def save_summary_csv(summary, output_path):
-    """
-    保存单个场景的汇总指标到独立 CSV 文件。
-    """
-    os.makedirs(os.path.dirname(output_path), exist_ok=True)
-
-    with open(output_path, "w", newline="", encoding="utf-8") as f:
-        writer = csv.writer(f)
-        writer.writerow(SUMMARY_COLUMNS)
-        writer.writerow([
-            summary["network_type"],
-            summary["scenario"],
-            summary["method"],
-            summary["num_samples"],
-            f"{summary['avg_device_ms']:.4f}",
-            f"{summary['avg_cloud_ms']:.4f}",
-            f"{summary['avg_comm_ms']:.4f}",
-            f"{summary['avg_total_ms']:.4f}",
-            f"{summary['accuracy']:.6f}",
-            f"{summary['violation_ratio']:.6f}",
-            f"{summary['throughput_fps']:.4f}",
-        ])
-
-    print(f"  [Save] summary -> {output_path}")
-
-
-# =====================================================================
-# 第七部分：主流程（任务 9-13）
-# =====================================================================
-
+# ── 主流程 ────────────────────────────────────────────────────────────
 def main():
     parser = argparse.ArgumentParser(
         description="Janus — Fig.7 Result Generator (dynamic pruning + splitting)")
@@ -430,7 +257,7 @@ def main():
     # 1-2. 计算 alpha_max 和步长
     a_max = declining_rate(x_0, N)
     step = 0.01
-    num_steps = int(a_max / step)
+    num_steps = int(a_max / step) + 1
 
     print(f"[Model]  {config.MODEL_NAME}, N={N}, x_0={x_0}, D_M={D_M}, bits={bits}")
     print(f"[Config] SLA={args.sla}ms, split_k={args.split_k}")
@@ -438,7 +265,6 @@ def main():
     print(f"[Comm]   通信大小按中间 token 张量大小计算（非原图字节数）")
 
     # 1-3. 加载数据集
-    from utils.imagenet_loader import get_imagenet_loader
     loader = get_imagenet_loader(args.data_path, batch_size=1, num_workers=0)
     total_samples = len(loader.dataset)
     print(f"[Data]   {total_samples} samples loaded")
@@ -460,16 +286,18 @@ def main():
         net_type = sc["network_type"]
         scenario = sc["scenario"]
         tag = f"{net_type.lower()}_{scenario}"
+        cold_start_bw = sc["cold_start_bw"]
 
         # 2-1. 读取该场景完整带宽 trace
         trace_path = os.path.join(trace_dir, sc["trace_file"])
-        bw_series = load_bandwidth_series(trace_path)
+        bw_series = load_bandwidth_series(trace_path, bw_floor=sc["bw_floor"])
         avg_bw = sum(bw_series) / len(bw_series)
         min_bw = min(bw_series)
         max_bw = max(bw_series)
 
         print(f"\n  [{tag}] trace_len={len(bw_series)}, "
-              f"avg_bw={avg_bw:.2f}, min_bw={min_bw:.2f}, max_bw={max_bw:.2f} Mbps")
+              f"avg_bw={avg_bw:.2f}, min_bw={min_bw:.2f}, max_bw={max_bw:.2f} Mbps, "
+              f"cold_start_bw={cold_start_bw} Mbps")
 
         # 2-2. 遍历整个数据集
         results = []
@@ -480,14 +308,15 @@ def main():
             images = images.to(dev)
             label = int(labels.item())
 
-            # 2-3. 当前样本取当前带宽
-            bandwidth_mbps = get_bandwidth_for_sample(bw_series, sample_idx)
+            # 2-3. 当前样本的观测带宽和估计带宽
+            observed_bw = get_bandwidth_for_sample(bw_series, sample_idx)
+            estimated_bw = estimate_bandwidth(bw_series, sample_idx, cold_start_bw)
 
-            # 2-4. 调用 Janus 单样本评估
+            # 2-4. 调用 Janus 单样本评估（基于估计带宽）
             record = run_janus_sample(
                 model, images, label, sample_idx,
                 N, x_0, D_M, bits, num_steps, step,
-                bandwidth_mbps, args.sla, args.split_k)
+                observed_bw, estimated_bw, args.sla, args.split_k)
 
             results.append(record)
 
@@ -495,12 +324,13 @@ def main():
             sl = record["split_layer"]
             split_counts[sl] = split_counts.get(sl, 0) + 1
 
-        # 2-5. 场景跑完：保存 records
+        # 2-5. 场景跑完：保存 records（Janus 多 alpha, split_layer 两列）
         records_path = os.path.join(output_dir, f"janus_{tag}_records.csv")
-        save_records_csv(results, net_type, scenario, records_path)
+        save_records_csv(results, METHOD, net_type, scenario, records_path,
+                         extra_columns=["alpha", "split_layer"])
 
         # 2-6. 计算并保存 summary
-        summary = summarize(results, net_type, scenario)
+        summary = summarize(results, METHOD, net_type, scenario)
         summary_path = os.path.join(output_dir, f"janus_{tag}_summary.csv")
         save_summary_csv(summary, summary_path)
 

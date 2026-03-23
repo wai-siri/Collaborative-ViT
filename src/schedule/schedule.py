@@ -159,7 +159,7 @@ if __name__ == '__main__':
 
     a_max = declining_rate(x_0, N)
     step = 0.01
-    num_steps = int(a_max / step)
+    num_steps = int(a_max / step) + 1
     B = 210 * 1000000  # bps(bits/s) 200-300
     SLA = 100.0
 
