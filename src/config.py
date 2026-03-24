@@ -55,6 +55,7 @@ DEFAULT_SLA = 300.0  # ms
 DEFAULT_BATCH_SIZE = 1
 PRUNE_PER_LAYER = 23  # 每层固定裁剪 token 数（论文 Fig.7 baseline = 23）
 SPLIT_K = 5           # fine-to-coarse 候选点密度参数（论文参数 k）
+BANDWIDTH_WINDOW_SIZE = 30  # 滑动窗口带宽估计的窗口大小（最近 W 个历史观测参与调和平均）
 
 # 网络配置
 DEFAULT_SERVER_IP = '127.0.0.1'

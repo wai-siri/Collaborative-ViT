@@ -152,7 +152,7 @@ def main():
             sid = cached["sample_id"]
             # 当前 trace 时间步的真实带宽点值（仅记录）
             observed_bw = get_bandwidth_for_sample(bw_series, sid)
-            # 基于历史观测的调和平均估计带宽（用于 comm_ms 计算和路径选择）
+            # 基于滑动窗口调和平均的估计带宽（用于 comm_ms 计算和路径选择）
             estimated_bw = estimate_bandwidth(bw_series, sid, cold_start_bw)
 
             # 计算 cloud 路径通信时间（基于估计带宽）

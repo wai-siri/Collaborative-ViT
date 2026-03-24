@@ -136,13 +136,13 @@ def main():
               f"avg_bw={avg_bw:.2f}, min_bw={min_bw:.2f}, max_bw={max_bw:.2f} Mbps, "
               f"cold_start_bw={cold_start_bw} Mbps")
 
-        # 为该场景逐样本计算 comm_ms（基于调和平均估计带宽 + token tensor 大小）
+        # 为该场景逐样本计算 comm_ms（基于滑动窗口调和平均估计带宽 + token tensor 大小）
         scenario_results = []
         for cached in inference_cache:
             sid = cached["sample_id"]
             # 当前 trace 时间步的真实带宽点值（仅记录，不用于 comm_ms 计算）
             observed_bw = get_bandwidth_for_sample(bw_series, sid)
-            # 基于历史观测的调和平均估计带宽（用于 comm_ms 计算）
+            # 基于滑动窗口调和平均的估计带宽（用于 comm_ms 计算）
             estimated_bw = estimate_bandwidth(bw_series, sid, cold_start_bw)
             comm_ms = predict_tensor_transfer_time(x_0, D_M, bits, estimated_bw)
             total_time_ms = cached["cloud_ms"] + comm_ms

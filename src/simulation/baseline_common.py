@@ -11,7 +11,7 @@ Simulation 公共模块 — 供 device_only / cloud_only / mixed / janus 复用
   - predict_tensor_transfer_time: token tensor 传输时间预测
   - load_bandwidth_series:    从 trace CSV 读取完整带宽序列
   - get_bandwidth_for_sample: 按样本索引循环映射带宽（所有脚本统一使用此方式记录逐样本带宽）
-  - estimate_bandwidth:       基于历史观测的调和平均带宽估计（冷启动 + harmonic mean）
+  - estimate_bandwidth:       滑动窗口调和平均带宽估计（冷启动 + sliding window harmonic mean）
   - run_pruned_vit_inference: 统一的 pruned ViT 推理（用于准确率）
   - summarize:                汇总指标计算
   - save_records_csv:         保存逐样本明细 CSV
@@ -191,41 +191,48 @@ def get_bandwidth_for_sample(bandwidth_series, sample_idx):
     return bandwidth_series[sample_idx % len(bandwidth_series)]
 
 
-def estimate_bandwidth(bandwidth_series, sample_idx, cold_start_bw):
+def estimate_bandwidth(bandwidth_series, sample_idx, cold_start_bw,
+                       window_size=None):
     """
-    带宽估计函数 — 基于已观测到的带宽样本做调和平均。
+    带宽估计函数 — 基于最近 W 个已观测带宽样本的滑动窗口调和平均。
 
     论文语义：在处理第 sample_idx 个样本时，只能利用之前已经观测到的
     带宽信息来估计当前带宽，而不是直接使用当前真实带宽点值。
 
     逻辑：
       - 若 sample_idx == 0，尚无历史观测，返回冷启动值 cold_start_bw
-      - 若 sample_idx > 0，对 bandwidth_series[:sample_idx] 中循环映射到的
-        前 sample_idx 个带宽值做调和平均：
-          B = n / Σ(1/b_i)
+      - 若 sample_idx > 0，取最近 W 个历史观测做调和平均：
+          B = k / Σ(1/b_i)
+        其中 k = min(sample_idx, window_size)
 
     Args:
         bandwidth_series: list[float], 完整带宽序列（已做 bw_floor 保护）
         sample_idx:       int, 当前样本索引（0-based）
         cold_start_bw:    float, 冷启动带宽估计值（Mbps）
                           论文值：LTE = 7.6, 5G = 14.7
+        window_size:      int | None, 滑动窗口大小；
+                          None 时使用 config.BANDWIDTH_WINDOW_SIZE（默认 30）
 
     Returns:
         float: 估计带宽 (Mbps)
     """
+    if window_size is None:
+        window_size = config.BANDWIDTH_WINDOW_SIZE
+
     if sample_idx == 0:
         return cold_start_bw
 
-    # 收集 sample_idx 之前已观测到的带宽值（循环映射）
-    n = sample_idx
+    # 滑动窗口：只取最近 window_size 个已观测带宽值
     series_len = len(bandwidth_series)
+    k = min(sample_idx, window_size)
+    start = sample_idx - k
     reciprocal_sum = 0.0
-    for i in range(n):
+    for i in range(start, sample_idx):
         b_i = bandwidth_series[i % series_len]
         reciprocal_sum += 1.0 / b_i
 
-    # 调和平均：B = n / Σ(1/b_i)
-    estimated_bw = n / reciprocal_sum
+    # 调和平均：B = k / Σ(1/b_i)
+    estimated_bw = k / reciprocal_sum
     return estimated_bw
 
 
@@ -319,7 +326,7 @@ def save_records_csv(results, method, network_type, scenario, output_path,
 
     调用方须确保 results[i] 中已有以下两个带宽键：
       - "observed_bandwidth_mbps":  当前 trace 时间步的真实带宽点值
-      - "estimated_bandwidth_mbps": 基于调和平均的带宽估计值（用于计算 comm_ms）
+      - "estimated_bandwidth_mbps": 基于滑动窗口调和平均的带宽估计值（用于计算 comm_ms）
     所有四个脚本均通过 load_bandwidth_series() + get_bandwidth_for_sample() +
     estimate_bandwidth() 在写入前完成带宽字段填充。
 
