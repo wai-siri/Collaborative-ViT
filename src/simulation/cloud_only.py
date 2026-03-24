@@ -5,8 +5,8 @@ Cloud-Only Baseline — Fig.7 结果生成器
   - 固定每层裁剪 23 tokens 的 baseline pruning（论文 Fig.7 口径）
   - split_layer = 0（全部在 cloud 端执行，device_ms = 0）
   - 使用 cloud profiler 线性模型预测 cloud 端逐层延迟（不使用真实计时）
-  - comm_ms = 初始 token 张量大小 (x_0 * D_M * bits) / 动态带宽
-    与 Janus split_layer=0 完全一致，传输的是 embedding 后的 token tensor
+  - comm_ms = 原始图片文件字节数 * 8 / 动态带宽
+    cloud-only 传输的是原始图片文件（JPEG/PNG 编码后的真实大小，逐样本不同）
   - 使用真实 forward 得到分类结果计算准确率（本地执行，语义上代表云端）
   - 准确率只算一次复用；时延按 6 个网络场景分别计算，
     每个样本按 trace 时间步循环映射带宽，逐样本独立计算 comm_ms
@@ -36,7 +36,7 @@ from schedule.schedule import init
 from utils.imagenet_loader import get_imagenet_loader
 from simulation.baseline_common import (
     NETWORK_SCENARIOS, build_fixed_baseline_schedule,
-    predict_cloud_time, predict_tensor_transfer_time,
+    predict_cloud_time, predict_image_transfer_time,
     load_bandwidth_series, get_bandwidth_for_sample, estimate_bandwidth,
     run_pruned_vit_inference, summarize, save_records_csv, save_summary_csv,
 )
@@ -73,7 +73,7 @@ def main():
     print(f"[Config] prune_per_layer={prune_per_layer}, SLA={sla}ms")
     print(f"[Schedule] layer 1 keep={token_schedule[1]}, "
           f"layer {N} keep={token_schedule[N]}")
-    print(f"[Comm]   通信大小按 token tensor 计算: x_0={x_0} * D_M={D_M} * bits={bits} = {x_0*D_M*bits} bits")
+    print(f"[Comm]   通信大小按原始图片文件字节数计算（逐样本不同）")
 
     # 1-3. 加载数据集
     loader = get_imagenet_loader(data_path, batch_size=1, num_workers=0)
@@ -81,15 +81,18 @@ def main():
     print(f"[Data]   {total_samples} samples loaded")
 
     # 1-4. 逐样本推理
-    # cloud_ms 固定，comm_ms 由 token tensor 大小和动态带宽共同决定，留到 Phase 2
+    # cloud_ms 固定，comm_ms 由原始图片文件大小和动态带宽共同决定，留到 Phase 2
     cloud_ms_value = predict_cloud_time(token_schedule, N)
     print(f"[Profiler] cloud_ms (all samples) = {cloud_ms_value:.4f} ms")
 
     inference_cache = []
-    for sample_idx, (images, labels) in enumerate(
+    img_sizes_sum = 0
+    for sample_idx, (images, labels, img_sizes) in enumerate(
             tqdm(loader, desc="Cloud-Only Inference", total=total_samples)):
         images = images.to(dev)
         label = int(labels.item())
+        image_size_bytes = int(img_sizes.item())
+        img_sizes_sum += image_size_bytes
 
         with torch.no_grad():
             pred_label, _ = run_pruned_vit_inference(
@@ -102,14 +105,17 @@ def main():
             "true_label": label,
             "correct": correct,
             "cloud_ms": cloud_ms_value,
+            "image_size_bytes": image_size_bytes,
         })
 
     # ── 控制台输出准确率概览 ──
     total_correct = sum(r["correct"] for r in inference_cache)
     accuracy = total_correct / total_samples
+    avg_img_kb = img_sizes_sum / total_samples / 1024
     print(f"\n===== Cloud-Only Inference Done =====")
     print(f"  Accuracy             : {accuracy:.6f}")
     print(f"  Cloud Time (ms)      : {cloud_ms_value:.4f}")
+    print(f"  Avg Image Size       : {avg_img_kb:.1f} KB")
     print("=" * 60)
 
     # ================================================================
@@ -136,7 +142,7 @@ def main():
               f"avg_bw={avg_bw:.2f}, min_bw={min_bw:.2f}, max_bw={max_bw:.2f} Mbps, "
               f"cold_start_bw={cold_start_bw} Mbps")
 
-        # 为该场景逐样本计算 comm_ms（基于滑动窗口调和平均估计带宽 + token tensor 大小）
+        # 为该场景逐样本计算 comm_ms（基于滑动窗口调和平均估计带宽 + 原始图片文件字节数）
         scenario_results = []
         for cached in inference_cache:
             sid = cached["sample_id"]
@@ -144,7 +150,7 @@ def main():
             observed_bw = get_bandwidth_for_sample(bw_series, sid)
             # 基于滑动窗口调和平均的估计带宽（用于 comm_ms 计算）
             estimated_bw = estimate_bandwidth(bw_series, sid, cold_start_bw)
-            comm_ms = predict_tensor_transfer_time(x_0, D_M, bits, estimated_bw)
+            comm_ms = predict_image_transfer_time(cached["image_size_bytes"], estimated_bw)
             total_time_ms = cached["cloud_ms"] + comm_ms
             violate = 1 if total_time_ms > sla else 0
 

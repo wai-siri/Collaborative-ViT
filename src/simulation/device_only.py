@@ -77,7 +77,7 @@ def main():
     # 1-4. 逐样本推理
     device_ms_value = predict_device_time(token_schedule, N)
     base_results = []
-    for sample_idx, (images, labels) in enumerate(
+    for sample_idx, (images, labels, _img_sizes) in enumerate(
             tqdm(loader, desc="Device-Only Inference", total=total_samples)): # 进度条包装器
         images = images.to(dev)
         label = int(labels.item())

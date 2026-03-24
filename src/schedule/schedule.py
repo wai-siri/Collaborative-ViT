@@ -46,7 +46,7 @@ def cloud_profiler(x_l, layer):
     b = cloud_profiler_data[str(layer - 1)]["b"]
     return k * x_l + b
 
-def schedule(N, x_0, D_M, bits, num_steps, step, B, SLA, split_k=5):
+def schedule(N, x_0, D_M, bits, num_steps, step, B, SLA, split_k=5, image_size_bytes=0):
     # 全局最优 fallback：当没有任何配置满足 SLA 时，返回总时延最低的配置
     best_fail_total_ms = float('inf')
     best_fail_alpha = 0.0
@@ -67,7 +67,8 @@ def schedule(N, x_0, D_M, bits, num_steps, step, B, SLA, split_k=5):
 
         T_device, T_cloud, T_comm = {}, {}, {}
         T_comm[N + 1] = 0.0  # device-only: 无通信
-        T_comm[0] = (x_0 * D_M * bits) / B * 1000  # cloud-only: 传输初始 token 表示
+        # cloud-only: 传输原始图片文件（逐样本真实字节数）
+        T_comm[0] = (image_size_bytes * 8) / B * 1000
 
         # fine-to-coarse 候选 split point 集合
         C = set()
@@ -130,4 +131,7 @@ if __name__ == '__main__':
     B = 210 * 1000000  # bps(bits/s) 200-300
     SLA = 100.0
 
-    print(schedule(N, x_0, D_M, bits, num_steps, step, B, SLA))
+    # 假设一个典型图片大小 100KB 用于测试
+    image_size_bytes = 100 * 1024
+    print(schedule(N, x_0, D_M, bits, num_steps, step, B, SLA,
+                   image_size_bytes=image_size_bytes))

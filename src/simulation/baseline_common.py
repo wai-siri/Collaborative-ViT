@@ -8,7 +8,8 @@ Simulation 公共模块 — 供 device_only / cloud_only / mixed / janus 复用
   - build_fixed_baseline_schedule: 固定每层裁剪的 token schedule
   - predict_device_time:      device profiler 线性模型预测
   - predict_cloud_time:       cloud profiler 线性模型预测
-  - predict_tensor_transfer_time: token tensor 传输时间预测
+  - predict_image_transfer_time:  原始图片传输时间预测（cloud-only 路径）
+  - predict_tensor_transfer_time: 中间 token tensor 传输时间预测（split inference 路径）
   - load_bandwidth_series:    从 trace CSV 读取完整带宽序列
   - get_bandwidth_for_sample: 按样本索引循环映射带宽（所有脚本统一使用此方式记录逐样本带宽）
   - estimate_bandwidth:       滑动窗口调和平均带宽估计（冷启动 + sliding window harmonic mean）
@@ -23,6 +24,8 @@ import os
 
 import pandas as pd
 import torch
+
+import config
 
 from schedule.schedule import device_profiler, cloud_profiler
 from schedule.token_pruning import prune_tokens
@@ -126,27 +129,53 @@ def predict_cloud_time(token_schedule, N):
     return total_ms
 
 
-def predict_tensor_transfer_time(x_0, D_M, bits, bandwidth_mbps):
+def predict_image_transfer_time(image_size_bytes, bandwidth_mbps):
     """
-    计算 cloud 路径的通信时间：传输 embedding 后的 token tensor。
-    comm_ms = x_0 * D_M * bits / (bandwidth_mbps * 1e6) * 1000
+    计算 cloud-only 路径的通信时间：传输原始图片文件。
+    comm_ms = image_size_bytes * 8 / (bandwidth_mbps * 1e6) * 1000
 
-    与 Janus scheduler 中 split_layer=0 的通信量计算方式完全一致，
-    确保 baseline 与 Janus cloud-only 退化路径口径统一。
+    论文语义：cloud-only 场景下，边端将原始图片直接发送到云端，
+    由云端完成全部推理。传输数据量为真实图片文件大小（JPEG/PNG
+    编码后的字节数），逐样本不同。
+
+    适用场景：
+      - cloud_only.py（全部样本）
+      - mixed.py 选择 cloud 路径时
+      - janus.py 中 split_layer == 0 时
 
     Args:
-        x_0:            int, 初始 token 数（含 CLS）
+        image_size_bytes: int, 原始图片文件大小（字节），从数据集逐样本读取
+        bandwidth_mbps:   float, 当前带宽 (Mbps)
+
+    Returns:
+        comm_ms: float, 传输时间（毫秒）
+    """
+    transferred_bits = image_size_bytes * 8  # bytes -> bits
+    comm_ms = transferred_bits / (bandwidth_mbps * 1e6) * 1000
+    return comm_ms
+
+
+def predict_tensor_transfer_time(num_tokens, D_M, bits, bandwidth_mbps):
+    """
+    计算协同切分路径的通信时间：传输中间 token tensor。
+    comm_ms = num_tokens * D_M * bits / (bandwidth_mbps * 1e6) * 1000
+
+    适用场景：
+      - janus.py 中 1 <= split_layer <= N（真实 split inference）
+
+    注意：cloud-only 场景（split_layer == 0）不应使用此函数，
+    应使用 predict_image_transfer_time() 计算原始图片传输时间。
+
+    Args:
+        num_tokens:     int, 中间 token 数（split 层输出的 token 数量）
         D_M:            int, token embedding 维度
         bits:           int, 数据类型占用 bit 数
         bandwidth_mbps: float, 当前带宽 (Mbps)
 
     Returns:
         comm_ms: float, 传输时间（毫秒）
-
-    Raises:
-        ValueError: 如果 bandwidth_mbps <= 0
     """
-    transferred_bits = x_0 * D_M * bits
+    transferred_bits = num_tokens * D_M * bits
     comm_ms = transferred_bits / (bandwidth_mbps * 1e6) * 1000
     return comm_ms
 
@@ -166,7 +195,7 @@ def load_bandwidth_series(trace_file, bw_floor=1.0):
     Args:
         trace_file: str, trace 文件的完整路径
         bw_floor:   float, 带宽下限（Mbps），低于此值的统一抬到此值
-                    典型值：LTE=1.0, 5G=5.0
+                    当前所有场景统一使用 0.01 Mbps（仅做除零保护）
 
     Returns:
         list[float]: 带宽序列（Mbps），长度与原始 trace 一致，最小值 = bw_floor

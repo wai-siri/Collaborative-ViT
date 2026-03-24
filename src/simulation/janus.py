@@ -4,7 +4,10 @@ Janus — Fig.7 结果生成器
 功能：
   - 对每个样本 / 每个网络条件，调用 Janus 动态调度器选择最优 (alpha, split_layer)
   - 使用 profiler 线性模型预测 device / cloud 端逐层延迟（与 baseline 同口径）
-  - comm_ms = 中间 token 张量大小 / 动态带宽（传输 split 后的中间表示，非原图）
+  - comm_ms 计算规则：
+      split_layer=0:     传输原始图片文件 (逐样本真实字节数 / 带宽)
+      1<=split_layer<=N: 传输中间 token tensor (x_l[s]*D_M*bits / 带宽)
+      split_layer=N+1:   无通信 (comm_ms=0)
   - 使用真实 forward（device_forward + cloud_forward）得到分类结果计算准确率
   - 逐网络场景、逐样本独立调度并执行推理
 
@@ -51,31 +54,33 @@ METHOD = "janus"
 # Janus 特有：时延预测
 # =====================================================================
 
-def predict_janus_latency(N, x_0, D_M, bits, alpha, split_layer, bandwidth_bps):
+def predict_janus_latency(N, x_0, D_M, bits, alpha, split_layer, bandwidth_bps,
+                          image_size_bytes=0):
     """
     Janus 时延分解函数 — 基于 profiler 线性模型预测，不做真实 forward。
 
     时间口径与 baseline 完全一致：
       - device_ms:  累加 layer 1..split_layer 的 device profiler
       - cloud_ms:   累加 layer (split_layer+1)..N 的 cloud profiler
-      - comm_ms:    中间 token 张量大小 / 带宽（非原图字节数）
+      - comm_ms:    见下方语义
 
     split_layer 语义：
-      - 0:     cloud-only -> device_ms=0, comm_ms 传输 x_0 * D_M * bits
-      - 1..N:  真实 split  -> comm_ms 传输 x_l[split_layer] * D_M * bits
+      - 0:     cloud-only -> device_ms=0, comm_ms 传输原始图片文件（逐样本真实字节数）
+      - 1..N:  真实 split  -> comm_ms 传输中间 token tensor x_l[split_layer]*D_M*bits
       - N+1:   device-only -> cloud_ms=0, comm_ms=0
 
     token 数来自 compute_token_schedule(alpha, N, x_0)，保证与 scheduler
     和真实 forward 使用完全相同的 token 逻辑。
 
     Args:
-        N:              int, Transformer 层数
-        x_0:            int, 初始 token 数（含 CLS）
-        D_M:            int, token embedding 维度
-        bits:           int, 数据类型占用 bit 数
-        alpha:          float, declining rate
-        split_layer:    int, split point (0 to N+1)
-        bandwidth_bps:  float, 当前带宽 (bps)
+        N:                int, Transformer 层数
+        x_0:              int, 初始 token 数（含 CLS）
+        D_M:              int, token embedding 维度
+        bits:             int, 数据类型占用 bit 数
+        alpha:            float, declining rate
+        split_layer:      int, split point (0 to N+1)
+        bandwidth_bps:    float, 当前带宽 (bps)
+        image_size_bytes: int, 原始图片文件大小（字节），split_layer==0 时使用
 
     Returns:
         dict: {device_ms, cloud_ms, comm_ms, total_ms}
@@ -94,16 +99,16 @@ def predict_janus_latency(N, x_0, D_M, bits, alpha, split_layer, bandwidth_bps):
         for l in range(split_layer + 1, N + 1):
             cloud_ms += cloud_profiler(x_l[l], l)
 
-    # ── comm_ms：中间 token 张量大小 / 带宽 ──
+    # ── comm_ms ──
     if split_layer >= N + 1:
         # device-only: 无通信
         comm_ms = 0.0
     elif split_layer == 0:
-        # cloud-only: 传输初始 token 表示 (embedding 后)
-        transferred_bits = x_0 * D_M * bits
+        # cloud-only: 传输原始图片文件（逐样本真实字节数）
+        transferred_bits = image_size_bytes * 8
         comm_ms = transferred_bits / bandwidth_bps * 1000
     else:
-        # split: 传输 split 后的中间 token 表示
+        # split (1..N): 传输中间 token tensor
         transferred_bits = x_l[split_layer] * D_M * bits
         comm_ms = transferred_bits / bandwidth_bps * 1000
 
@@ -157,7 +162,7 @@ def run_janus_inference(model, image, alpha, split_layer):
 def run_janus_sample(model, image, label, sample_id,
                      N, x_0, D_M, bits, num_steps, step,
                      observed_bandwidth_mbps, estimated_bandwidth_mbps,
-                     sla_ms, split_k):
+                     sla_ms, split_k, image_size_bytes):
     """
     对单个样本完成 Janus 完整评估流程：
       1. 取模型结构参数 N, x_0, D_M, bits
@@ -182,6 +187,7 @@ def run_janus_sample(model, image, label, sample_id,
         estimated_bandwidth_mbps:  float, 调和平均估计带宽 (Mbps)，用于 scheduler 和 comm_ms
         sla_ms:                    float, SLA 延迟上限（毫秒）
         split_k:                   int, fine-to-coarse 候选点密度参数
+        image_size_bytes:          int, 原始图片文件大小（字节），用于 split_layer==0 的通信量计算
 
     Returns:
         dict: 包含所有结果字段的记录
@@ -191,11 +197,13 @@ def run_janus_sample(model, image, label, sample_id,
 
     # ── 1. 调用 scheduler（基于估计带宽） ──
     alpha, split_layer = schedule(
-        N, x_0, D_M, bits, num_steps, step, bandwidth_bps, sla_ms, split_k)
+        N, x_0, D_M, bits, num_steps, step, bandwidth_bps, sla_ms, split_k,
+        image_size_bytes=image_size_bytes)
 
     # ── 2. 预测时延（profiler 线性模型，基于估计带宽） ──
     latency = predict_janus_latency(
-        N, x_0, D_M, bits, alpha, split_layer, bandwidth_bps)
+        N, x_0, D_M, bits, alpha, split_layer, bandwidth_bps,
+        image_size_bytes=image_size_bytes)
 
     # ── 3. 真实推理（用于准确率） ──
     pred_label = run_janus_inference(model, image, alpha, split_layer)
@@ -252,7 +260,8 @@ def main():
     print(f"[Model]  {config.MODEL_NAME}, N={N}, x_0={x_0}, D_M={D_M}, bits={bits}")
     print(f"[Config] SLA={sla}ms, split_k={split_k}")
     print(f"[Scheduler] alpha_max={a_max:.4f}, step={step}, num_steps={num_steps}")
-    print(f"[Comm]   通信大小按中间 token 张量大小计算（非原图字节数）")
+    print(f"[Comm]   split=0 传输原始图片文件（逐样本真实字节数）")
+    print(f"[Comm]   split=1..N 传输中间 token tensor: x_l[s]*D_M*bits")
 
     # 1-3. 加载数据集
     loader = get_imagenet_loader(data_path, batch_size=1, num_workers=0)
@@ -288,10 +297,11 @@ def main():
         results = []
         split_counts = {}  # 统计 split_layer 分布
 
-        for sample_idx, (images, labels) in enumerate(
+        for sample_idx, (images, labels, img_sizes) in enumerate(
                 tqdm(loader, desc=f"Janus [{tag}]", total=total_samples)):
             images = images.to(dev)
             label = int(labels.item())
+            image_size_bytes = int(img_sizes.item())
 
             # 2-3. 当前样本的观测带宽和估计带宽
             observed_bw = get_bandwidth_for_sample(bw_series, sample_idx)
@@ -301,7 +311,8 @@ def main():
             record = run_janus_sample(
                 model, images, label, sample_idx,
                 N, x_0, D_M, bits, num_steps, step,
-                observed_bw, estimated_bw, sla, split_k)
+                observed_bw, estimated_bw, sla, split_k,
+                image_size_bytes)
 
             results.append(record)
 

@@ -7,8 +7,8 @@ Mixed Baseline — Fig.7 结果生成器
   - 不是 split computing，不是动态 split point，是 binary selector
   - 固定每层裁剪 23 tokens 的 baseline pruning（论文 Fig.7 口径）
   - 使用 profiler 线性模型分别预测 device / cloud 端逐层延迟
-  - comm_ms = 初始 token 张量大小 (x_0 * D_M * bits) / 动态带宽（仅 cloud 路径时 > 0）
-    与 Janus split_layer=0 完全一致，传输的是 embedding 后的 token tensor
+  - comm_ms = 原始图片文件字节数 * 8 / 动态带宽（仅 cloud 路径时 > 0）
+    cloud 路径传输的是原始图片文件（JPEG/PNG 编码后的真实大小，逐样本不同）
   - 使用真实 forward 得到分类结果计算准确率（只执行一次，缓存复用）
   - 准确率只算一次复用；路径选择和时延按 6 个网络场景分别计算
 
@@ -41,7 +41,7 @@ from schedule.schedule import init
 from utils.imagenet_loader import get_imagenet_loader
 from simulation.baseline_common import (
     NETWORK_SCENARIOS, build_fixed_baseline_schedule,
-    predict_device_time, predict_cloud_time, predict_tensor_transfer_time,
+    predict_device_time, predict_cloud_time, predict_image_transfer_time,
     load_bandwidth_series, get_bandwidth_for_sample, estimate_bandwidth,
     run_pruned_vit_inference, summarize, save_records_csv, save_summary_csv,
 )
@@ -85,7 +85,7 @@ def main():
     print(f"[Profiler] device_pred_ms = {device_pred_ms:.4f} ms")
     print(f"[Profiler] cloud_pred_ms  = {cloud_pred_ms:.4f} ms")
     print(f"[Logic]  对每个样本: 若 device_total <= cloud_total → 选 device, 否则选 cloud")
-    print(f"[Comm]   cloud 路径通信大小按 token tensor 计算: x_0={x_0} * D_M={D_M} * bits={bits} = {x_0*D_M*bits} bits")
+    print(f"[Comm]   cloud 路径通信大小按原始图片文件字节数计算（逐样本不同）")
 
     # 1-4. 加载数据集
     loader = get_imagenet_loader(data_path, batch_size=1, num_workers=0)
@@ -95,10 +95,11 @@ def main():
     # 1-5. 逐样本推理（只跑一次，缓存 pred_label / correct）
     #       路径选择取决于带宽，留到 Phase 2 按场景计算
     inference_cache = []
-    for sample_idx, (images, labels) in enumerate(
+    for sample_idx, (images, labels, img_sizes) in enumerate(
             tqdm(loader, desc="Mixed Inference", total=total_samples)):
         images = images.to(dev)
         label = int(labels.item())
+        image_size_bytes = int(img_sizes.item())
 
         with torch.no_grad():
             pred_label, _ = run_pruned_vit_inference(
@@ -110,6 +111,7 @@ def main():
             "pred_label": pred_label,
             "true_label": label,
             "correct": correct,
+            "image_size_bytes": image_size_bytes,
         })
 
     # ── 控制台输出准确率概览 ──
@@ -155,8 +157,8 @@ def main():
             # 基于滑动窗口调和平均的估计带宽（用于 comm_ms 计算和路径选择）
             estimated_bw = estimate_bandwidth(bw_series, sid, cold_start_bw)
 
-            # 计算 cloud 路径通信时间（基于估计带宽）
-            comm_ms = predict_tensor_transfer_time(x_0, D_M, bits, estimated_bw)
+            # 计算 cloud 路径通信时间（基于估计带宽，传输原始图片文件）
+            comm_ms = predict_image_transfer_time(cached["image_size_bytes"], estimated_bw)
             cloud_total_ms = cloud_pred_ms + comm_ms
 
             # 路径选择：选预测时延更小的

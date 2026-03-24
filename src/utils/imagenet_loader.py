@@ -39,12 +39,15 @@ class ImageNetParquetDataset(Dataset):
         获取单个样本
         
         Returns:
-            tuple: (image_tensor, label)
+            tuple: (image_tensor, label, image_size_bytes)
+                image_size_bytes: int, 原始图片编码后的字节数（JPEG/PNG），
+                    用于 cloud-only 场景下计算真实图片传输通信时间
         """
         row = self.df.iloc[idx]
         
         # 解码图像字节流
         img_bytes = row['image']['bytes']
+        image_size_bytes = len(img_bytes)  # 原始编码后的真实文件大小
         img = Image.open(io.BytesIO(img_bytes)).convert('RGB')
         
         # 获取标签
@@ -54,7 +57,7 @@ class ImageNetParquetDataset(Dataset):
         if self.transform:
             img = self.transform(img)
         
-        return img, label
+        return img, label, image_size_bytes
 
 
 def get_imagenet_loader(parquet_path, batch_size=1, num_workers=0, shuffle=False):
@@ -110,16 +113,17 @@ def verify_imagenet_data(parquet_path):
     
     # 测试加载第一个batch
     print("\nLoading first batch...")
-    for images, labels in loader:
+    for images, labels, img_sizes in loader:
         print(f"Image shape: {images.shape}")
         print(f"Image dtype: {images.dtype}")
         print(f"Image range: [{images.min():.3f}, {images.max():.3f}]")
         print(f"Label: {labels.item()}")
+        print(f"Image file size: {img_sizes.item()} bytes ({img_sizes.item()/1024:.1f} KB)")
         break
     
-    # 统计标签分布
+    # 统计标签分布和图片大小
     print("\nLabel statistics:")
-    all_labels = [label.item() for _, label in loader]
+    all_labels = [label.item() for _, label, _ in loader]
     unique_labels = set(all_labels)
     print(f"Unique labels: {len(unique_labels)}")
     print(f"Label range: [{min(all_labels)}, {max(all_labels)}]")
